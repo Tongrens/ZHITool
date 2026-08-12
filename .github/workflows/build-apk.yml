@@ -37,7 +37,7 @@ jobs:
         uses: android-actions/setup-android@v4
 
       - name: Install Android SDK platform 37
-        run: sdkmanager "platforms;android-37"
+        run: sdkmanager "platforms;android-37" --channel=3
 
       - name: Make Gradle wrapper executable
         run: chmod +x gradlew
