@@ -28,6 +28,7 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.PressGestureScope
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
@@ -676,7 +677,8 @@ private fun RearLyricScreen() {
 /**
  * 「错位交替」样式的背屏页（纯净模式）：流动星空背景 + 当前句/上一句错落漂浮歌词 + 右上角时钟
  * （可开关）。样式配置走独立的 [StaggerConfigState]（与默认样式/包级配置不通用）；基础 [RearConfigState]
- * 只借用安全区微调/帧率/律动增益等设备级参数。严格长按整页 1 秒打开封面页（大封面 + 进度条 + 控制键），
+ * 只借用安全区微调/帧率/律动增益等设备级参数。词幕模式仅长按可见的右上角时钟 1 秒打开封面页；
+ * 关闭时间显示后入口一并关闭。SuperLyric 保留整页长按。封面页包含大封面 + 进度条 + 控制键，
  * 开合动画与切句同款"后退"语言：歌词舞台向中心收拢缩小压暗、封面从身后（1.12 倍）落到面前，
  * 星空同步收到后退脉冲。切句时歌词飞向随机远点、星空以该点为消失点收敛——歌词动星星才动。
  */
@@ -725,7 +727,7 @@ private fun StaggerRearScreen() {
         0f
     }
 
-    // 封面页（整页长按 1 秒打开）：面板进度驱动歌词舞台后退 + 黑底 + 封面/进度条/按键浮现。
+    // 封面页：词幕只允许从可见时钟长按打开；SuperLyric 保留整页长按。
     var coverPanelExpanded by remember { mutableStateOf(false) }
     val panelProgress by animateFloatAsState(
         targetValue = if (coverPanelExpanded) 1f else 0f,
@@ -751,24 +753,45 @@ private fun StaggerRearScreen() {
         onHide = { coverPanelExpanded = false },
     )
 
-    // 收起态整页手势：短按只提示，按满统一的 1000ms 才打开；提示胶囊背景同步显示真实进度。
-    var pageHolding by remember { mutableStateOf(false) }
-    var pageHintVisible by remember { mutableStateOf(false) }
-    var pageHintTick by remember { mutableIntStateOf(0) }
-    LaunchedEffect(pageHintTick) {
-        if (pageHintTick == 0) return@LaunchedEffect
-        pageHintVisible = true
+    // 收起态手势：短按有效命中区只提示，按满统一的 1000ms 才打开；提示胶囊同步显示真实进度。
+    var panelHoldActive by remember { mutableStateOf(false) }
+    var panelHintVisible by remember { mutableStateOf(false) }
+    var panelHintTick by remember { mutableIntStateOf(0) }
+    LaunchedEffect(panelHintTick) {
+        if (panelHintTick == 0) return@LaunchedEffect
+        panelHintVisible = true
         delay(REAR_PANEL_HINT_MS)
-        pageHintVisible = false
+        panelHintVisible = false
     }
-    val pageHoldProgress by animateFloatAsState(
-        targetValue = if (pageHolding) 1f else 0f,
+    val panelHoldProgress by animateFloatAsState(
+        targetValue = if (panelHoldActive) 1f else 0f,
         animationSpec = tween(
-            durationMillis = if (pageHolding) REAR_LONG_PRESS_MS.toInt() else 0,
+            durationMillis = if (panelHoldActive) REAR_LONG_PRESS_MS.toInt() else 0,
             easing = LinearEasing,
         ),
         label = "staggerCoverHoldProgress",
     )
+    val panelLongPressTarget = staggerPanelLongPressTarget(lyricSource, staggerCfg.showClock)
+    val onPanelPress: suspend PressGestureScope.(Offset) -> Unit = {
+        panelHintVisible = false
+        panelHoldActive = true
+        val released = try {
+            withTimeoutOrNull(REAR_LONG_PRESS_MS) { tryAwaitRelease() }
+        } finally {
+            panelHoldActive = false
+        }
+        when (released) {
+            null -> coverPanelExpanded = true
+            true -> panelHintTick++
+            false -> Unit // 移出/被子控件消费：取消，不显示短按提示。
+        }
+    }
+    LaunchedEffect(panelLongPressTarget) {
+        if (panelLongPressTarget == StaggerPanelLongPressTarget.DISABLED) {
+            panelHoldActive = false
+            panelHintVisible = false
+        }
+    }
 
     // 星空联动：切句 / 开合封面页时发脉冲，其余时间星星只漂浮闪烁不动。
     // 开封面页=后退（歌词星星一起变远）；关封面页=前进（一起变近），不是再变远。
@@ -792,21 +815,9 @@ private fun StaggerRearScreen() {
     Box(
         modifier = Modifier
             .fillMaxSize()
-            .pointerInput(coverPanelExpanded) {
-                if (!coverPanelExpanded) {
-                    detectTapGestures(
-                        onPress = {
-                            pageHintVisible = false
-                            pageHolding = true
-                            val released = withTimeoutOrNull(REAR_LONG_PRESS_MS) { tryAwaitRelease() }
-                            pageHolding = false
-                            when (released) {
-                                null -> coverPanelExpanded = true
-                                true -> pageHintTick++
-                                false -> Unit // 移出/被子控件消费：取消，不显示短按提示。
-                            }
-                        },
-                    )
+            .pointerInput(coverPanelExpanded, panelLongPressTarget) {
+                if (!coverPanelExpanded && panelLongPressTarget == StaggerPanelLongPressTarget.WHOLE_PAGE) {
+                    detectTapGestures(onPress = onPanelPress)
                 }
             }
             .pointerInput(coverPanelExpanded) {
@@ -857,9 +868,21 @@ private fun StaggerRearScreen() {
             )
         }
 
+        // 词幕 + 错位交替：命中区只覆盖右上角时钟及其轻量触控余量，不再接管整页触摸。
+        if (!coverPanelExpanded && panelLongPressTarget == StaggerPanelLongPressTarget.CLOCK) {
+            Box(
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .size(width = 64.dp, height = 42.dp)
+                    .pointerInput(Unit) {
+                        detectTapGestures(onPress = onPanelPress)
+                    },
+            )
+        }
+
         PanelLongPressHint(
-            visible = !coverPanelExpanded && (pageHolding || pageHintVisible),
-            progress = if (pageHolding) pageHoldProgress else 0f,
+            visible = !coverPanelExpanded && (panelHoldActive || panelHintVisible),
+            progress = if (panelHoldActive) panelHoldProgress else 0f,
             modifier = Modifier
                 .align(Alignment.BottomEnd)
                 .fillMaxWidth(2f / 3f)
